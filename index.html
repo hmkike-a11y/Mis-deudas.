@@ -284,6 +284,9 @@
     <div><label>Nota para estos pagos (opcional)</label><input type="text" id="notaQuincena" placeholder="ej. pago de la quincena 1"></div>
   </div>
   <div class="actions">
+    <button class="secondary" onclick="sugerirDistribucionQuincena()">📌 Sugerir cómo repartir esta quincena</button>
+  </div>
+  <div class="actions">
     <button onclick="registrarPagosQuincena()">✅ Registrar estos pagos y descontar saldos</button>
   </div>
 </div>
@@ -548,6 +551,12 @@ function generarConsejos(){
     const peor = [...conInteres].sort((a,b)=>b.tasaInteres-a.tasaInteres)[0];
     consejos.push({msg:`Si te sobra dinero extra este mes, tu prioridad debería ser "${peor.nombre}" — es la que más interés te cobra (${(peor.tasaInteres*100).toFixed(1)}% mensual).`, sev:'info'});
   }
+  if(activas.length>1){
+    const orden = listaOrdenadaActivas();
+    const top = orden[0];
+    const nombreEstrategia = estrategiaOrden==='avalancha' ? 'avalancha (mayor interés primero)' : 'snowball (la más pequeña primero)';
+    consejos.push({msg:`Con tu estrategia actual (${nombreEstrategia}), tu prioridad #1 para pagar más rápido es "${top.nombre}" — te faltan ${fmt(top.saldo)}. Cualquier plata extra que tengas, ponla ahí primero para ir tachando deudas.`, sev:'info'});
+  }
   return consejos;
 }
 function renderConsejos(){
@@ -676,14 +685,15 @@ function eliminarDesdeChecklist(id, tipo){
   });
 }
 
-function calcularOrdenSugerido(){
+function listaOrdenadaActivas(){
   const activas = deudasSaldo.filter(d => !d.archivada && d.saldo>0);
-  let ordenadas;
   if(estrategiaOrden==='avalancha'){
-    ordenadas = [...activas].sort((a,b)=> (b.tasaInteres||0)-(a.tasaInteres||0) || a.saldo-b.saldo);
-  } else {
-    ordenadas = [...activas].sort((a,b)=> a.saldo-b.saldo);
+    return [...activas].sort((a,b)=> (b.tasaInteres||0)-(a.tasaInteres||0) || a.saldo-b.saldo);
   }
+  return [...activas].sort((a,b)=> a.saldo-b.saldo);
+}
+function calcularOrdenSugerido(){
+  const ordenadas = listaOrdenadaActivas();
   const mapa = {};
   ordenadas.forEach((d,i)=> mapa[d.id] = i+1);
   return mapa;
@@ -1186,7 +1196,57 @@ function borrarDigitoPin(){
   actualizarPinDots();
 }
 
-/* ---------- pedir consejo a una IA (Claude) ---------- */
+/* ---------- sugerir cómo repartir el dinero de la quincena ---------- */
+function sugerirDistribucionQuincena(){
+  const ingreso = parseFloat(document.getElementById('ingreso').value)||0;
+  const meta = parseFloat(document.getElementById('meta').value)||0;
+  let gastos = 0;
+  gastosFijos.forEach(g=>{ if(g.incluir) gastos += g.monto; });
+  let presupuestoDeudas = ingreso - gastos - meta;
+
+  const orden = listaOrdenadaActivas();
+  const itemsSaldo = orden.map(d=>({id:d.id, tipo:'saldo', nombre:d.nombre, cuota: Math.min(d.cuota||0, d.saldo)}));
+  const itemsRecurrente = deudasRecurrente.map(d=>({id:d.id, tipo:'recurrente', nombre:d.nombre, cuota: d.cuota||0}));
+  // los compromisos fijos van primero (son los más difíciles de aplazar sin consecuencias), luego las deudas con saldo en tu orden de prioridad
+  const items = [...itemsRecurrente, ...itemsSaldo];
+
+  let restante = presupuestoDeudas;
+  const asignados = [];
+  const aplazados = [];
+  items.forEach(it=>{
+    if(it.cuota<=0) return;
+    if(restante >= it.cuota){
+      asignados.push({...it, monto: it.cuota});
+      restante -= it.cuota;
+    } else if(restante > 0){
+      asignados.push({...it, monto: Math.round(restante)});
+      restante = 0;
+    } else {
+      aplazados.push(it);
+    }
+  });
+
+  Object.keys(checkState).forEach(k=>{ checkState[k] = {...checkState[k], check:false}; });
+  asignados.forEach(a=>{ checkState[a.id] = {check:true, monto:a.monto}; });
+  persistAll();
+  renderChecklist();
+  calcular();
+
+  let mensaje;
+  if(presupuestoDeudas<0){
+    mensaje = `Con tu ingreso de ${fmt(ingreso)}, tus gastos fijos y la meta de ${fmt(meta)} libres, no alcanza ni para empezar a pagar deudas esta quincena. Vas a tener que bajar la meta, reducir gastos, o buscar algo extra.`;
+  } else {
+    mensaje = '';
+    const completos = asignados.filter(a=>a.monto===a.cuota);
+    const parciales = asignados.filter(a=>a.monto<a.cuota);
+    if(completos.length>0) mensaje += 'Paga completo: ' + completos.map(a=>a.nombre).join(', ') + '. ';
+    if(parciales.length>0) mensaje += 'Alcanza para un abono parcial a: ' + parciales.map(a=>`${a.nombre} (${fmt(a.monto)})`).join(', ') + '. ';
+    if(aplazados.length>0) mensaje += 'Esta quincena aplaza: ' + aplazados.map(a=>a.nombre).join(', ') + '.';
+    if(!mensaje) mensaje = 'No tienes compromisos pendientes que repartir esta quincena — ¡vas muy bien!';
+    mensaje += ' Ya marqué esto en tu checklist de arriba, revísalo antes de registrar los pagos.';
+  }
+  mostrarAlerta(mensaje);
+}
 function pedirConsejoIA(){
   const activas = deudasSaldo.filter(d=>!d.archivada && d.saldo>0);
   let resumen = 'Quiero que me ayudes a organizar el pago de mis deudas. Esta es mi situación:\n\n';
